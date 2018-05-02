@@ -10,219 +10,217 @@ use Common;
 use POSIX;
 
 if (scalar(@ARGV) < 1) {
-    die "Please input a Rfam family name, along with the number of seqs you want (optional)\n";
+    manpage();
 } else {
-    my $sfold_profile = 0;
-    my $print_heatmaps = 0;
-    my $totalseq = 0; #total number of seqs we want, use 0 for all in process_alignmt
-    my $totalseq = $ARGV[1] if scalar(@ARGV)>1; 
-    my $aln_file = "../../data/analysis/$ARGV[0]"."_analysis/process_alignmt.out";
-    my $nat = process_native($aln_file,$totalseq);
+    my $args = process_args(@ARGV);
+    my $verbose = $args->{"verbose"};
     my $type = "Sfold";
-    if ($sfold_profile) {$type = run_sfold_profiling($ARGV[0],$nat)};
-#    my $lengths = process_alignmt($aln_file);
-#    my $stems = process_stems($ARGV[0],$lengths);
+    my $names = run_sfold_profiling($args);
+#if you've already run Sfold and don't want to rerun every time, comment above and uncomment next two lines
+#    my @names = map {get_name($_)} @{$args->{"seqs"}};
+#    my $names = \@names;
     my $newclus = 0;
     my $feats;
     my $repeat = 1;
     my $found = {};
+    my $extend = {};
     while ($repeat) {
-	my $data = process_profiling($ARGV[0],$nat,$type);
+	my $data = process_profiling($args->{"output"},$names,$extend);
 	$feats = $data->[0];
 	my $lengths = $data->[1];
-	my $cells = process_trip_feat($feats,$lengths,$found);
-	scatterplot_cells($cells,$ARGV[0]."-init") if $print_heatmaps;
-	my $eps = find_eps($lengths);
-	my $clusters = cluster($cells,$eps);
-#	scatterplot_cluster($clusters->[0],$ARGV[0]);
-	my $clusstems = print_clusters($clusters->[0],$cells,$feats,$nat,$ARGV[0]);
-#    my $clusstems = print_clusters($clusters,$cells,$stems,$nat);
-	$newclus = find_centroid($clusstems->[0],$lengths,$ARGV[0],$data->[2]);
+	my $cells = process_trip_feat($feats,$lengths,$found,$verbose);
+	my $eps = find_eps($lengths,$verbose);
+	my $clusters = cluster($cells,$eps,$verbose);
+	my $clusstems = print_clusters($clusters->[0],$cells,$feats,$verbose);
+	$newclus = find_centroid($clusstems->[0],$lengths,$data->[2],$verbose);
 #	print_clus_stats($newclus);
-	improve_cluster($newclus,$data,$ARGV[0],$nat,$clusstems->[1],$clusters->[1]);
-#	print_clus_stats($newclus);
-	if (found_newclus($found,$newclus,$feats)) {
+	improve_cluster($newclus,$data,$args,$clusstems->[1],$clusters->[1]);
+	if (found_newclus($found,$newclus,$feats,$verbose)) {
 	    $found = get_truepos($newclus,$feats);
 #	    print_clus_stats($newclus);
-	    $type = resample($found,$ARGV[0],$feats);
-	    $type = "Resample";
-	    print "Resampling:\n";
+	    $extend = resample($found,$args,$feats);
+	    print "Resampling:\n" if ($verbose);
 	} else {
 	    $repeat = 0;
 	}
     }
     print "FINAL CLUSTERS:\n";
-    print_clus_stats($newclus);
+#    print_clus_stats($newclus);
     print_clus($newclus);
-    print_clus_to_file($newclus,$ARGV[0],$totalseq);
-#    my $rfam = get_Rfam_ref($ARGV[0]);
-#    native_stems($rfam);
+    print_clus_to_file($newclus,$args);
 }
 
-sub print_clus_stats {
-    my $newclus = shift;
-    for (my $i = 1; $i<scalar(@$newclus); $i++) {
-	next if (!$newclus->[$i]);
-	my $clus = $newclus->[$i];
-	my $feats = $clus->{"constraints"};
-	printf "found %d seqs for cluster %d\n", scalar(keys %$feats),$i;
+#usage instructions 
+sub manpage {
+    print "ConsensusStems code for Academic Users, Version 1.0 (April 2018)\n\n";
+    print "Usage: perl ConsensusStems.pl [options]... directory_of_sequences\n\n";
+    print "Required: perl, Boltzmann sampling with constraints, RNA profiling, a MFE prediction program\n";
+    print "\tBoltzmann sampling with constraints is implemented by Sfold, which can be requested from http://sfold.wadsworth.org/cgi-bin/index.pl\n";
+    print "\tRNA profiling is available at https://github.com/gtfold/RNAStructProfiling\n";
+    print "\tA recommended MFE prediction program is GTfold's gtmfe option, available at https://github.com/gtfold/gtfold\n\n";
+    print "Input a directory containing all sequences (in FASTA format) to be processed.\n\tRecommended: at least 8 related sequences.\n\tConsensusStems is not designed for nor tested with less than 8 sequences\n\n";
+    print "Final output with clusters written to [output directory]/ConsensusStems_output.txt\n";
+    print "Options:\n";
+    print "\t-s <path>\t Path to invoke Sfold, eg -s /usr/bin/sfold (default)\n";
+    print "\t-p <path>\t Path to invoke RNAprofiling, eg -p ../RNAprofiling (default is ./RNAprofile)\n";
+    print "\t-m <path>\t Path to invoke MFE program, eg -m /usr/bin/gtmfe (default)\n";
+    print "\t-d <name>\t Path to MFE NNTM parameters eg -d Desktop/data/Turner99 (default is ./data)\n";
+    print "\t-o <path>\t Path to store output files, eg -o ../output (default is ./output)\n";
+    print "\t-f <name>\t Family name, eg -f tRNA (default is last directory name if exists or RNA)\n";
+    print "\t-v \t Flag to enable verbose output concerning details of the method\n";
+
+}
+
+sub process_args {
+    my @args = @_;
+    my $verbose = 0;
+    my $arghash = initialize();
+    my $dir = pop(@args);
+    $arghash->{"seqs"} = process_seqs($dir);
+    while (scalar(@args) > 0) {
+	process_options($arghash,\@args);
+    }
+    if (!exists $arghash->{"family"}) {
+	my @dirs = split(/\//,$dir);
+	if (scalar(@dirs)>1) {
+	    $arghash->{"family"} = pop(@dirs);
+	} else {
+	    $arghash->{"family"} = "RNA";
+	}
+    }
+    if ($verbose) {
+	print "Sfold path is ",$arghash->{"sfold"},"\n";
+	print "Prof path is ",$arghash->{"prof"},"\n";
+	print "MFE path is ",$arghash->{"mfe"},"\n";
+	print "output path is ",$arghash->{"output"},"\n";
+	print "family is ",$arghash->{"family"},"\n";
+    }
+    return $arghash;
+}
+
+sub initialize {
+    my %args;
+    $args{"sfold"} = "/usr/bin/sfold";
+    $args{"mfe"} = "/usr/bin/gtmfe";
+    $args{"prof"} = "./RNAprofile";
+#    $args{"family"} = "RNA";
+    $args{"output"} = "./output/";
+    $args{"verbose"} = 0;
+    return \%args;
+}
+
+sub process_seqs {
+    my $dir = shift;
+    my @dir = split(//,$dir);
+#    print "Found dir ",@dir," with last char $dir[-1]\n";
+    $dir = "$dir"."/" if ($dir[-1] ne '/');
+    my $files = `ls $dir | wc -l`;
+    print "Warning! Found less than eight files!\n" if ($files < 8);
+    my @files = `ls $dir`;
+    my @newfiles;
+    foreach my $file (@files) {#one file per line assumed
+	chomp($file);
+	$file = "$dir" . "$file";
+	open SEQ, "$file" or die "cannot open $file\n";
+	my $first = 1;
+	foreach (<SEQ>) {
+	    die "File $file is not in FASTA format\n" if ($first && !/^\>/);
+	    last;
+	}
+	push(@newfiles,$file);
+    }
+    return \@newfiles;
+}
+
+sub process_options {
+    my ($arghash,$args) = @_;
+    while ($args->[0] ne "-s" && $args->[0] ne "-p" && $args->[0] ne "-f" && $args->[0] ne "-o" && $args->[0] ne "-m" && $args->[0] ne "-d" && $args->[0] ne "-v") {
+	shift(@$args);
+	return if (scalar(@$args)<1);
+    }
+    if ($args->[0] eq "-s") {
+	$arghash->{"sfold"} = $args->[1];
+	splice(@$args,0,2);
+    } elsif ($args->[0] eq "-p") {
+	$arghash->{"prof"} = $args->[1];
+	splice(@$args,0,2);
+    } elsif ($args->[0] eq "-m") {
+	$arghash->{"mfe"} = $args->[1];
+	splice(@$args,0,2);
+    } elsif ($args->[0] eq "-d") {
+	$arghash->{"paramdir"} = $args->[1];
+	splice(@$args,0,2);
+    } elsif ($args->[0] eq "-f") {
+	$arghash->{"family"} = $args->[1];
+	splice(@$args,0,2);
+    } elsif ($args->[0] eq "-v") {
+	$arghash->{"verbose"} = 1;
+	shift(@$args);
+    } elsif ($args->[0] eq "-o") {
+	my @out = split(//,$args->[1]);
+	$args->[1] = "$args->[1]" . "/" if ($out[-1] ne '/');
+	$arghash->{"output"} = $args->[1];
+	splice(@$args,0,2);
     }
 }
 
-#grabs the native helices
-sub process_native {
-    my ($file,$totalseq) = @_;
-    my $seq;
-    my $fam;
-    my %nat;
-    my $thresh = 0.2; #accept if below this thresh
-    open ALN, "<$file" or die "cannot open $file\n";
-    foreach (<ALN>) {
-	if (/Sequence \.\.\/seq\/(\S+)\/(\S+)\.txt/) {
-	    $seq = $2;
-	    $fam = $1;
-	} elsif (/Profile ([\d\s\!]+)/) {
-#	    print "processing $seq $1\n";
-	    my @nat = split(/\s/,$1);
-	    $nat{$seq} = \@nat;
-	}
-    }
-    close(ALN);
-    $totalseq = 0 if ($totalseq < 0 || $totalseq > scalar(keys %nat));
-    if ($totalseq) {
-	my @keys = keys %nat;
-	my @passed = ();
-	while (scalar(keys %nat) > $totalseq) {
-	    my $rand = rand();
-#	    print "Found random number $rand\n";
-	    my $del = shift(@keys);
-	    if ($rand > $thresh) {
-		print "Deleting $del\n";
-		delete $nat{$del};
-	    } else {
-		push(@passed,$del);
-	    }
-	    if (scalar(@keys)==0) {
-		@keys = @passed;
-		@passed = ();
-	    }
-	}
-    }
-    print "Total seqs: ",scalar(keys %nat),"\n";
-    return \%nat;
-}
 
 #runs profiling on sfold outputs of fam
 sub run_sfold_profiling {
-    my ($fam,$nat) = @_;
-    my $run_sfold = 1;
-    foreach my $seq (keys %$nat) {
-	my $seqfile = "../../seq/$fam/$seq".".txt";
-	my $profile = "../../data/profiling_output/Rfam_$fam/$seq/$seq"."_sfold.out";
-	my $sfold = "../../data/sfold_output_Rfam/$fam"."/$seq"."/sample_1000.out";
-#run sfold
-	my $outdir = "/scratch/tmp/$seq" . "_output";
-
-	if ($run_sfold) {
-	    print "Running Sfold on $seq\n";
-	    `/usr/bin/sfold -o $outdir $seqfile`;
-	    my $outfile = $outdir."/sample_1000.out";
-	    $profile = "../../data/profiling_output/Rfam_$fam/$seq";
-	    `mkdir $profile`;
-	    $profile = $profile . "/$seq"."_sfold.out";
-	    $sfold = "../../data/sfold_output_Rfam/$fam"."/$seq";
-	    `mkdir $sfold`;
-	    $sfold = $sfold."/sample_1000.out";
-	    `mv $outfile $sfold`;
-	}
-	
-	`../../RNAStructProfiling/RNAprofile -sfold $sfold -g -v $seqfile > $profile`;
+    my ($args) = @_;
+    my $fam = $args->{"family"};
+    my $seqs = $args->{"seqs"};
+    my $spath = $args->{"sfold"};
+    my $ppath = $args->{"prof"};
+    my $output = $args->{"output"};
+    `mkdir $output`;
+    my @names=();
+    foreach my $seqfile (@$seqs) {
+	my $name = get_name($seqfile);
+	push(@names,$name);
+	my $profile = "$output"."$name.out";
+	my $outdir = "$output"."Sfold"."_$name";
+	print "Running Sfold on $seqfile\n";
+	`$spath -o $outdir $seqfile`;
+	my $outfile = $outdir."/sample_1000.out";
+	`$ppath -sfold $outfile -g -v $seqfile > $profile`;
+#	last;
     }
-    return "Sfold";
+#    $args->{"seqs"} = \@names;
+    return \@names;
 }
 
-#runs consensus_DP and grabs lengths
-sub process_alignmt {
-    my $file = shift;
-    my %lengths;
-    my @norm;
-    my $seq;
-    my $ave;
-    my $med;
-    my @out = `perl consensus_DP.pl $file`;
-    foreach (@out) {
-	if (/Length\: (\d+)/) {
-	    $lengths{$seq} = $1;
-#	    print "processing $seq\n";
-	} elsif (/(\S+)\:/) {
-	    $seq = $1;
-#	} elsif (/max length is ([\d\.]+), ([\d\.]+), (\d+), (\d+)/) {
-#	    $med = $1;
-#	    $ave = $2;
-#	    $lengths{"min"} = $3;
-#	    $lengths{"max"} = $4;
-#	    $lengths{"range"} = $4-$3;
-	}
-    }
-#    foreach (values %lengths) {
-#	my $val = abs($med-$_)*($med/$_);
-#	push(@norm,$val);
-#    }
-#    $lengths{"median"} = $med;
-#    $lengths{"stdev"} = stdev(\@norm);
-#    $lengths{"stdev"} = stdev([values %lengths]);
-#    print "Stdev of lengths is ",$lengths{"stdev"},"\n";
-    return \%lengths;
-}
-
-sub process_stems {
-    my ($fam,$nat) = @_;
-    my @seqs = keys %{$nat};
-    my %all;
-    foreach my $seq (@seqs) {
-	my $file = "../../data/profiling_output/Rfam_$fam"."/$seq".".out";
-	my @out = `perl calc_stem_class.pl $file`;
-	my %stems;
-#	print "\nprocessing $seq ";
-	foreach (@out) {
-	    if (/Stem (\d+) has ([\d+\s]+) \(([\d+\s]+)/) {
-		$stems{$1} = [$2,$3];
-#		print "$1 ";
-	    }
-	}
-	$all{$seq} = \%stems;
-    }
-    return \%all;
+sub get_name {
+    my $seq = shift;
+    my @dirs = split(/\//,$seq);
+    $seq = $dirs[-1];
+    $seq = $1 if ($seq =~ /(\S+)\.txt/);
+    $seq = $1 if ($seq =~ /(\S+)\.fa/);
+    $seq = $1 if ($seq =~ /(\S+)\.fasta/);
+    $seq = $1 if ($seq =~ /(\S+)\.seq/);
+    return $seq;
 }
 
 #grabs feature triplet info and puts into hash
 #processes input profiling file based on type:
 # 0 = gtboltzmann input, 1 = sfold input, 2 = resample input
 sub process_profiling {
-    my ($fam,$nat,$type) = @_;
-    my @seqs = keys %{$nat};
+    my ($outdir,$names,$extension) = @_;
     my %feats;
     my %lengths;
     my %nucl;
     my %files;
-    foreach my $seq (@seqs) {
+    foreach my $seq (@$names) {
+	my $extend = ".out";
+	if (exists $extension->{$seq}) {$extend = "_resample.out";}
+	my $file = "$outdir"."$seq"."$extend";
 	my @feat = ();
-	my $file = "../../data/profiling_output/Rfam_$fam"."/$seq".".out";
-	if ($type eq "Sfold") {
-	    $file = "../../data/profiling_output/Rfam_$fam"."/$seq"."/$seq"."_sfold.out";
-	} elsif ($type eq "Resample") {
-	    $file = "../../data/profiling_output/Rfam_$fam/$seq/resample.out";
-	    my $found = `test -e $file && echo Found || echo Missing`;
-	    if ($found =~ /Missing/) {
-		$file = "../../data/profiling_output/Rfam_$fam"."/$seq"."/$seq"."_sfold.out";
-	    }
-	}
 	open OUT, "<$file" or die "cannot open $file\n";
 	foreach (<OUT>) {
 	    if (/Featured helix (\d+)\: (\d+ \d+ \d+) with freq (\d+)/) {
 #	    $feats{$1} = $2;
 		$feat[$1] = $2;
-	    } elsif (/seq in .+ is ([UCAG]+) with length (\d+)/) {
+	    } elsif (/seq in .+ is ([UCAGTucagt]+) with length (\d+)/) {
 		$nucl{$seq} = [0,split(//,$1)];
 		$lengths{$seq} = $2;
 	    }
@@ -234,54 +232,15 @@ sub process_profiling {
     return [\%feats,\%lengths,\%nucl,\%files];
 }
 
-#takes all stems from all seqs, and normalizes HC trip info
-#takes normalized triplets, integerizes them and makes pairs hash
-#cell hash returned to be used with dbscan to group
-#return featcells to use features, cells to use stems
-sub process_trip {
-    my ($stems,$feats,$lengths) = @_;
-    my @seqs = keys %$lengths;
-    my $median = median([values %$lengths]);
-    my %cells;
-    my %featcells;
-    my @heatmap = (0) x $median;
-    foreach my $seq (@seqs) {
-	my $mystems = $stems->{$seq};
-	my $length = $lengths->{$seq};
-	my $myfeats = $feats->{$seq};
-	foreach my $stem (keys %$mystems) {
-	    my @hcs = split(/\s/,$mystems->{$stem}[0]);
-	    my $label = "$seq $stem";
-	    foreach my $feat (@hcs) {
-		my $featlabel = "$seq $feat";
-		my @trip = split(/\s/,$myfeats->[$feat]);	
-		my $i = ceil($trip[0]*$median/$length);
-		my $j = ceil($trip[1]*$median/$length);
-#		print "processing $label $feat @trip -> ($i,$j)\n";
-		for (my $k = 0; $k < $trip[2]; $k++) {
-		    add(\%cells,"$i $j",$label);
-		    add(\%featcells,"$i $j",$featlabel);
-		    $i++;
-		    $j--;
-		}
-	    }
-#	    $stocells{$label} = \@mycells;
-	}
-#	last;
-    }
-#    print "Found seqs for cells ",keys %cells,"\n";
-#    return \%cells;
-    return \%featcells;
-}
 
-#same as process_trip but instead of using stems, use features
 #compare against already found features in %found; add if not present
 sub process_trip_feat {
-my ($feats,$lengths,$found) = @_;
+    my ($feats,$lengths,$found,$verbose) = @_;
     my $median = median([values %$lengths]);
     my %featcells;
 #    my @heatmap = (0) x $median;
     foreach my $seq (keys %$feats) {
+	print "processing $seq\n" if ($verbose);
 	my $myfeats = $feats->{$seq};
 	my $length = $lengths->{$seq};
 	my @coords = ();
@@ -300,7 +259,7 @@ my ($feats,$lengths,$found) = @_;
 	    foreach my $coord (@coords) { 
 		add_feature($coord,$median,$length,\%featcells, "$seq $k");
 		push(@$myfeats,$coord);
-		print "Adding $seq ($k) $coord\n";
+		print "Adding $seq ($k) $coord\n" if ($verbose);
 		$k++;
 	    }
 	}
@@ -327,7 +286,7 @@ sub add_feature {
 #based on density of lengths; need to adjust for normalization
 #add median to lengths
 sub find_eps {
-    my $lengths = shift;
+    my ($lengths,$verbose) = @_;
     my $median = median([values %$lengths]);
     my $n = scalar(keys %$lengths);
     my $eps = 0;
@@ -345,7 +304,7 @@ sub find_eps {
 	my @noise = map {$label->{$_} == 0 ? ($_):() } keys %$label;
 	my @n = map {scalar(@{$ltoseq{$_}}) } @noise;
 	$noise = sum(\@n);
-	print "found eps $eps with $noise seq as noise\n";
+	print "found eps $eps with $noise seq as noise\n" if ($verbose);
 	$eps++;
     }
     print_eps($label,\%ltoseq);
@@ -373,7 +332,7 @@ sub print_eps {
 #clusters the cells, given the eps found from length densities
 #if it produces over half of the points as noise, lower minpts
 sub cluster {
-    my ($cells,$params) = @_;
+    my ($cells,$params,$verbose) = @_;
     my $eps = $params->[0];
     my $minpts = $params->[1];
     my $n = scalar(keys %$cells);
@@ -381,7 +340,7 @@ sub cluster {
     my $label;
     while ($noise > $n/2) {
 	if ($minpts < 3) {
-	    print "minpts below critical level of 3; raising eps to ",$eps+1,"\n";
+	    print "minpts below critical level of 3; raising eps to ",$eps+1,"\n" if ($verbose);
 	    $minpts = $params->[1];
 	    $eps = 3;
 	}
@@ -389,7 +348,7 @@ sub cluster {
 	my @noise = map {$label->{$_} == 0 ? ($_):() } keys %$label;
 	my @n = map {scalar(@{$cells->{$_}}) } @noise;
 	$noise = sum(\@n);
-	print "found minpts $minpts with $noise points as noise out of $n\n";
+	print "found minpts $minpts with $noise points as noise out of $n\n" if ($verbose);
 	$minpts--;
     }
     $minpts++;
@@ -507,16 +466,9 @@ sub scatterplot_cells {
 #prints the stems making up each cluster
 #returns an array indexed by cluster num, containing the stems in each cluster
 sub print_clusters {
-    my ($label,$cells,$stems,$nat,$fam) = @_;
+    my ($label,$cells,$stems,$verbose) = @_;
     my %clus;
     my %found;
-    my $verbose = 0;
-    my $print_heatmap = 1;
-    if ($print_heatmap) {
-	my $file = "../../Matlab/data/dbscan_init_$fam".".txt";
-	open OUT,">$file" or die "cannot open $file\n";
-    }
-    my $feat = 1; #if we want to cluster feats, instead of stems
     foreach my $cell (keys %$label) { #gives info by every cluster
 	add(\%clus,$label->{$cell},$cell);
     }
@@ -528,32 +480,16 @@ sub print_clusters {
 	foreach my $cell (@{$clus{$clust}}) {
 	    my $stms = $cells->{$cell};
 	    map {$allstems{$_}++} @$stms;
-	    if ($print_heatmap && $clust) {
-		print OUT "$cell ",scalar(@$stms),"\n";
-	    }
 	}
 	my @sorted = sort {$a cmp $b} keys %allstems;
 	my %myclus;
 	foreach my $stem (@sorted) { #for every stem in the cluster
 	    my @stem = split(/\s/,$stem);
-	    my $native = $nat->{$stem[0]};
 	    my $steminfo;
 	    my $steminfoprint;
-	    if ($feat) { #if using features to cluster
-		my $coords = $stems->{$stem[0]}[$stem[1]];
-		if (exists_num($native,$stem[1])) {
-		    $steminfoprint = "(*$stem[1]) [$coords]";
-		    $steminfo = "$stem[1] | $coords";
-		} else {
-		    $steminfoprint = "($stem[1]) [$coords]";
-		    $steminfo = "$stem[1] | $coords";
-		}
-	    } else { #if using stems to cluster
-		my $coords = $stems->{$stem[0]}{$stem[1]};
-		$steminfo = "$coords->[0] | $coords->[1]";
-		my @hcs = map {exists_num($native,$_) ? ("$_*") : ($_)} (split(/\s/,$coords->[0]));
-		$steminfoprint =  "(@hcs) [$coords->[1]]";
-	    }
+	    my $coords = $stems->{$stem[0]}[$stem[1]];
+	    $steminfoprint = "($stem[1]) [$coords]";
+	    $steminfo = "$stem[1] | $coords";
 	    print "\t$stem[0] $steminfoprint\n" if ($verbose);
 	    add(\%myclus,$stem[0],$steminfo);
 	    $found{$stem} = $clust if ($clust);
@@ -561,7 +497,6 @@ sub print_clusters {
 #	map {$found{$_} = $clust} @sorted if ($clust);
 	$clusters[$clust] = \%myclus;
     }
-    close OUT if ($print_heatmap);
     return [\@clusters,\%found];
 }
 
@@ -570,11 +505,10 @@ sub print_clusters {
 #finds the median coordinates of all seq stems
 #variation: use normalized coords?
 sub find_centroid {
-    my ($clusters,$lengths,$fam,$nucls) = @_;
+    my ($clusters,$lengths,$nucls,$verbose) = @_;
     my @newclus;
     my %hctoclus;
     my $median = $lengths->{"median"};
-    my $verbose = 1;
     for (my $clus = 0; $clus<scalar(@$clusters); $clus++) {
 	#skip if its the the noise cluster = 0
 	if (!$clus) {
@@ -628,10 +562,7 @@ sub find_centroid {
 	    push(@L,$l);
 	    push(@longest,$longest);
 	    push(@lengths,$lengths->{$seq});
-	    my $name = "$fam"."_c$clus" . "_$seq";
 	    my $bounds =  [$i,$i+$k-1,$j-$l+1,$j];
-#	    my $mfe = run_mfe($name,$seq,$nucl,$bounds);
-#	    push(@mfe,$mfe->[1]);
 	    push(@bpnums,$bpnum);
 	    $seqs{$seq} = [$i,$j,$k,$l];
 	    $constrain{$seq} = \@feats;
@@ -695,28 +626,38 @@ sub find_medcoords {
 #look within range of 0 to offset from theoretical median
 #offset composed of normalized length difference, plus length of hc to allow for split hc
 sub improve_cluster {
-    my ($newclus,$data,$fam,$native,$found,$minpts) = @_;
+    my ($newclus,$data,$args,$found,$minpts) = @_;
     my $feats = $data->[0];
     my $lengths = $data->[1];
     my $median = $lengths->{"median"};
     my @seqs = keys %$lengths;
     remove_char(\@seqs,"median");
     my %combine;
+    my $verbose = $args->{"verbose"};
+#make dir to store mfe seqs for missing seqs
+    my $outdir = $args->{"output"};
+    my $condir = $outdir . "constraints";
+    `mkdir $condir`;
+    $outdir = $outdir . "seqs";
+    `mkdir $outdir`;
+#processing each cluster
     for (my $i = 1; $i<scalar(@$newclus); $i++) {
 	my $clus = $newclus->[$i];
 	my $size = scalar(keys %{$clus->{"seqs"}});
-	print "For Cluster $i\n";
 	if ($size < $minpts) {
-	    my $badclus = $newclus->[$i];
+#	    my $badclus = $newclus->[$i];
 	    $newclus->[$i] = 0;
-	    print "\tCluster $i with ",$size," below $minpts threshold: deleting\n";
+	    print "\tCluster $i with ",$size," below $minpts threshold: deleting\n" if ($verbose);
 	    next;
 	}
+#make dir for each cluster
+	my $clusdir = $outdir."/cluster_$i";
+	`mkdir $clusdir`;
 	my ($score,$newconstraints) = @{find_missing(@_,$i)};
 	my $total = $score + $size; #since each present member of clus gets score of 1, so sum = size
 	if ($total <= 0) {
 	    $newclus->[$i] = 0;
-	    print "\tCluster $i with score of $total: deleting\n";
+	    print "\tCluster $i with score of $total: deleting\n" if ($verbose);
 	} else {
 	    #add found seq HC to cluster: update constraints, 
 	    my $constraints = $clus->{"constraints"};
@@ -734,12 +675,12 @@ sub improve_cluster {
 		    push(@js,($coords[1],$coords[1]-$coords[2]+1));
 		}
 		$stemcoords->{$seq} = find_stem_coords(\@is,\@js);
-		print "\tAdding $seq (@{$constraints->{$seq}}) [@{$stemcoords->{$seq}}]\n";
+		print "\tAdding $seq (@{$constraints->{$seq}}) [@{$stemcoords->{$seq}}]\n" if ($verbose);
 	    }
 	    my $newcentroid = recalc_centroid($stemcoords);
 	    $clus->{"centroid"} = $newcentroid;
-	    print "\tNew centroid: @$newcentroid\n";
-	    print "\tTotal score of cluster $i: $total\n";
+	    print "\tNew centroid: @$newcentroid\n" if ($verbose);
+	    print "\tTotal score of cluster $i: $total\n" if ($verbose);
 	}
 #	last if ($i == 3);
     }
@@ -783,7 +724,7 @@ sub find_mfe {
 # clus{seq} = [i,j,k,l]
 #return in %constrain list of features found
 sub find_missing {
-    my ($newclus,$data,$fam,$native,$found,$minpts,$i) = @_;
+    my ($newclus,$data,$args,$found,$minpts,$i) = @_;
     my $feats = $data->[0];
     my $lengths = $data->[1];
     my $clus = $newclus->[$i];
@@ -791,12 +732,8 @@ sub find_missing {
     my $missing = $clus->{"missing"};
     my $centroid = $clus->{"centroid"};
     my $bpnums = $clus->{"bpnum"};
-#    my $clusmed = $clus->{"offset"};
-#    my $offset = $median-$clusmed;
-#    my $med_coords = 
-#	[$centroid->[0]+$offset,$centroid->[0]+$offset+$centroid->[2]-1,$centroid->[1]+$offset-$centroid->[3]+1,$centroid->[1]+$offset];
     my $med_coords = $clus->{"medcoords"};
-    my $verbose = 1;
+    my $verbose = $args->{"verbose"};
     my $totalscore = 0;
     my %constrain;
     print "For cluster $i:\n" if ($verbose);
@@ -804,14 +741,11 @@ sub find_missing {
 	print "   For seq $seq, " if ($verbose);
 	my $feat = $feats->{$seq};
 	my $length = $lengths->{$seq};
-	my $nat = $native->{$seq};
 	my $diff = $length-$median;
 	my $nucl = $data->[2]{$seq};
 	my $bounds = find_boundaries($med_coords,$diff,$length);
-	my $scores = search_window($seq,$bounds,$nucl,$centroid,$found,$nat,$diff,$fam,$newclus,$i,$lengths,$data->[3]);
-#	shrink_window($bounds,$scores,$median);
-#	choose_best(\@scores,$found,$seq,$i,$newclus,$verbose,$nat);
-	my $mfe = run_mfe($fam,$i,$seq,$nucl,$bounds);
+	my $scores = search_window($seq,$bounds,$nucl,$centroid,$found,$diff,$args,$newclus,$i,$lengths,$data->[3]);
+	my $mfe = run_mfe($args,$i,$seq,$nucl,$bounds);
 	my $bpnum = 0;
 	if ($mfe->[1] != 0) {
 	    foreach my $bp (@{$mfe->[0]}) {
@@ -821,16 +755,8 @@ sub find_missing {
 #	    elsif ($bpnum >= ceil($bpnums/2)) {$scores{$seq} = 0;}
 	    elsif ($bpnum < ceil($bpnums/2)) {$totalscore--;}
 	} else {
-#	    $scores{$seq} = -2;
 	    $totalscore -= 2;
 	}
-
-#	my $adjusted = translate_mfe($mfe,$bounds);
-#	my $mincoords = match_to_hc($adjusted,$scores);
-#	$mincoords = get_constraints($adjusted) if (!$mincoords);
-#	$constrain{$seq} = $mincoords if ($mincoords);
-#	print @{$mfe->[0]}," [$mfe->[1]] {$bpnum bp}\n" if ($verbose);
-#	print "\t$seq: ";
 
 #if the found is a feature, save it
 	my @found = map {$_->[0] < scalar(@$feat) ? ($_->[0]) : ()} @$scores;
@@ -838,7 +764,7 @@ sub find_missing {
 	$constrain{$seq} = \@found;
 	print "found potential features @found\n" if ($verbose);
     }
-    print "Cumulative score of missing seqs: $totalscore\n";
+    print "Cumulative score of missing seqs: $totalscore\n" if ($verbose);
     return [$totalscore,\%constrain];
 }
 
@@ -870,16 +796,16 @@ sub get_constraints {
 
 #bounds = [i i' j' j]
 sub run_mfe {
-    my ($fam,$i,$seq,$nucl,$bounds) = @_;
+    my ($args,$i,$seq,$nucl,$bounds) = @_;
+    my $outdir = $args->{"output"};
+    my $fam = $args->{"family"};
     my $verbose = 0;
-    my $mkdirs = 0;
-    my $name = "$fam"."_c$i" . "_$seq";    
+    my $mkdirs = 1;
+#    my $name = "$outdir" . "$seq";    
 #make sequence file to run MFE
-    my $dir = "../../consensus/seqs/";
-    $dir = mkdirs($dir,$fam,$i) if ($mkdirs);
-    my $file = $dir . $name . ".txt";
+    my $file = "$outdir"."seqs/cluster_$i"."/$seq".".txt";
     open SEQ, ">$file" or die "cannot open $file\n";
-    print SEQ ">$name, $seq for window @$bounds\n";
+    print SEQ ">$fam, $seq for window @$bounds\n";
     my @copy = @$nucl;
     my $length;
     my $diff = $bounds->[2]-$bounds->[1];
@@ -900,14 +826,20 @@ sub run_mfe {
     }
     close(SEQ);
 #make constraints file
-    $dir = "../../consensus/constraints/";
-    $dir = mkdirs($dir,$fam,$i) if $mkdirs == 1;
-    my $constraints = $dir . $name . ".txt";
+    my $constraints = $outdir."constraints/$seq" . ".txt";
     make_constraints($constraints,$diff,$k,$length);
-    my $gtmfe = "../../Desktop/gtfold-master/bin/gtmfe";
-    my $paramdir = "../../Desktop/gtfold-master/gtfold-mfe/data/Turner99";
+    my $gtmfe = $args->{"mfe"};
+    my $paramdir = $args->{"paramdir"};
     my @mfe = `$gtmfe --paramdir $paramdir -c $constraints $file`;
     print "@mfe\n" if $verbose;
+    my $mfe = process_mfe($diff,$k,@mfe);
+    return $mfe;
+}
+
+#write different code to process mfe output here
+#if gtmfe format not used
+sub process_mfe {
+    my ($diff,$k,@mfe) = @_;
     my ($bp,$mfe);
     foreach (@mfe) {
 	if (/^[\.\(\)]+$/) {
@@ -925,20 +857,9 @@ sub run_mfe {
 	    $mfe = $1;
 	}
     }
-    my $ct = "$name" . ".ct";
-    `mv $ct ../../consensus/stems/`;
     return [$bp,$mfe];
 }
 
-#makes dirs under $dir for $fam, then cluster $i
-sub mkdirs {
-    my ($dir,$fam,$i) = @_;
-    $dir = $dir . "$fam/";
-    `mkdir $dir`;
-    $dir = $dir . "cluster$i/";
-    `mkdir $dir`;
-    return $dir;
-}
 
 #calculate bp, then translate back to original coords 
 sub translate_mfe {
@@ -1034,7 +955,7 @@ sub make_constraints {
 #searchs the window within bounds by making dotplot
 #make sure you get the profiling file right
 sub search_window {
-    my ($seq,$bounds,$nucl,$centroid,$found,$nat,$diff,$fam,$allclus,$i,$lengths,$files) = @_;
+    my ($seq,$bounds,$nucl,$centroid,$found,$diff,$fam,$allclus,$i,$lengths,$files) = @_;
     my @scores;
     my $verbose = 0;
     my $move = 0; #to move from another cluster; disabled for now
@@ -1045,7 +966,6 @@ sub search_window {
     my $file = $files->{$seq};
 #    my $dotplot = make_dotplot($bounds,$nucl);
     print "For seq $seq ($diff), looking within bounds [@$bounds]\n" if ($verbose);
-#    my $file = "../../data/profiling_output/Rfam_$fam"."/$seq".".out";
     open OUT,"<$file" or die "cannot open $file\n";
     foreach (<OUT>) {
 	chomp;
@@ -1074,15 +994,6 @@ sub search_window {
 			}
 		    }
 		}
-		if ($verbose) {
-		    print " ** " if (exists_num($nat,$1));
-#		    print "\n";
-		}
-#		    if ($coverage > 1) {
-#			$score = ave($ratios)+$5/1000 + 1;
-#		    } else {
-#			$score = ave($ratios)+$5/1000 + $coverage;
-#		    }
 		if (implausible_HC($ratios,$coords,$med_coords,$length,$median)) {
 		    print " xxx\n" if ($verbose);
 		    next;
@@ -1268,9 +1179,8 @@ sub get_truepos {
 # every single cluster has to have at least one previously found feat for this to be a NO
 #new find stored in newclus, found contains the previously found 
 sub found_newclus {
-    my ($found,$newclus,$feats) = @_;
+    my ($found,$newclus,$feats,$verbose) = @_;
     return 1 if (scalar(keys %$found) == 0);
-    my $verbose = 1;
     for (my $i = 1; $i<scalar(@$newclus); $i++) {
 	next if (!$newclus->[$i]);
 	my $clus = $newclus->[$i];
@@ -1299,18 +1209,24 @@ sub found_newclus {
  
 #forbid the features shown to be false positives, ie not part of remaining clusters
 sub resample {
-    my ($found,$fam,$feats) = @_;
+    my ($found,$args,$feats) = @_;
+    my $seqs = $args->{"seqs"};
+    my $out = $args->{"output"};
+    my $spath = $args->{"sfold"};
+    my $ppath = $args->{"prof"};
+    my $verbose = $args->{"verbose"};
     my %found;
     my $mkdir = 1;
+    my %extend;
 #prohibit all features not found in clusters
-    foreach my $seq (keys %$feats) {
+    foreach my $seqfile (@$seqs) {
+	my $seq = get_name($seqfile);
 	my $feat = $feats->{$seq};
 	my $myfound = [];
 	$myfound = $found->{$seq} if (exists $found->{$seq});
-	print "examining $seq with found @$myfound\n";
+	print "examining $seq with found @$myfound\n" if ($verbose);
 	if (scalar(@$feat) <= scalar(@$myfound)+1) {next;}
-	my $name = "$fam" . "_$seq";
-	my $cfile = "../../consensus/constraints/$fam/$name" . ".txt";
+	my $cfile = "$out"."$seq"."_constraints.txt";
 	open CON, ">$cfile" or die "cannot open $cfile\n";	
 	for (my $i = 1; $i<scalar(@$feat); $i++) {
 	    if (exists_char($myfound,$feat->[$i])) { next;}
@@ -1318,32 +1234,28 @@ sub resample {
 	}
 	close(CON);
 #run sfold with constraints
-	my $seqfile = "../../seq/$fam/$seq".".txt";
-	my $outdir = "/scratch/tmp/$name" . "_output";
-	`/usr/bin/sfold -o $outdir -f $cfile $seqfile`;
+	my $outdir = "$out"."$seq"."_resample";
+	print "Resampling $seqfile\n";
+	`$spath -o $outdir -f $cfile $seqfile`;
 #test new structures are energetically plausible
-	my $output = "../../data/gtboltzmann_outputs/Rfam_$fam/$seq/output.samples";
-	$output = "../../data/sfold_output_Rfam/$fam"."/$seq"."/sample_1000.out";
-	my $stats = energy_calcs($output);
-	my $out = $outdir . "/sample_1000.out";
-	my $newstats = energy_calcs($out);
+	my $sout = "$out"."Sfold"."_$seq"."/sample_1000.out";
+	my $stats = energy_calcs($sout);
+	$sout = $outdir . "/sample_1000.out";
+	my $newstats = energy_calcs($sout,$verbose);
 	if (!plausible($stats,$newstats)) {
-	    print "implausible new sample for $seq; sticking with original\n";
+	    print "implausible new sample for $seq; sticking with original\n" if ($verbose);
 	    next;
 	}
 #run profiling on new sfold output
-	my $profile = "../../data/profiling_output/Rfam_$fam/$seq/resample.out";
-	`../../RNAStructProfiling/RNAprofile -sfold $out -g -v $seqfile > $profile`;
-#save files
-	my $sfolddir = "../../data/sfold_output_Rfam/$fam/$seq/resample/";
-	`mkdir $sfolddir` if $mkdir;
-	`mv $out $sfolddir`;
+	my $profile = "$out"."$seq"."_resample.out";
+	`$ppath -sfold $sout -g -v $seqfile > $profile`;
+	$extend{$seq}++;
     }
-    return "Resample";
+    return \%extend;
 }
 
 sub energy_calcs {
-    my ($out) = @_;
+    my ($out,$verbose) = @_;
     my @fe;
     my $sfold = 1;
     if ($out =~ /gtboltzmann/) {$sfold = 0;}
@@ -1362,7 +1274,7 @@ sub energy_calcs {
 	}	
     }
     my @stats = (min(\@fe),maxm(\@fe),ave(\@fe),median(\@fe),stdev(\@fe));
-    printf "Sample energies: min %.2f, max %.2f, ave %.2f, med %.2f, with stdev %.2f\n",@stats;
+    printf "Sample energies: min %.2f, max %.2f, ave %.2f, med %.2f, with stdev %.2f\n",@stats if ($verbose);
     return \@stats;
 }
 
@@ -1374,6 +1286,17 @@ sub plausible {
 	return 1;
     }
     return 0;
+}
+
+
+sub print_clus_stats {
+    my $newclus = shift;
+    for (my $i = 1; $i<scalar(@$newclus); $i++) {
+	next if (!$newclus->[$i]);
+	my $clus = $newclus->[$i];
+	my $feats = $clus->{"constraints"};
+	printf "found %d seqs for cluster %d\n", scalar(keys %$feats),$i;
+    }
 }
 
 sub print_clus {
@@ -1396,9 +1319,9 @@ sub print_clus {
 }
 
 sub print_clus_to_file {
-    my ($newclus,$fam,$num) = @_;
-    my $file = "../../data/analysis/$fam"."_analysis/dbscan_stem.txt";
-    $file =~ s/\.txt/$num\.txt/ if $num;
+    my ($newclus,$args) = @_;
+    my $outdir = $args->{"output"};
+    my $file = $outdir . "ConsensusStems_output.txt";
     open CLUS,">$file" or die "cannot open $file\n";
     my $k = 1;
     for (my $i = 1; $i<scalar(@$newclus); $i++) {
@@ -1463,7 +1386,6 @@ sub native_stems {
     }
     print $last+1," ",$last2+1," $k\n";
 }
-################################# NOT USED #########################################################
 
 #NOT USED
 #makes a dotplot initialized to window 
